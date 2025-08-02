@@ -445,7 +445,7 @@ const handleSlippiURIAsync = async (aUrl: string) => {
   }
 
   switch (protocol) {
-    case "slippi:": {
+    case "slippi-mirror:": {
       let replayPath = myUrl.searchParams.get("path");
       if (!replayPath) {
         return;
