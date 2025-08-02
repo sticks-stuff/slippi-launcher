@@ -197,7 +197,7 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
-const slippiProtocol = "slippi";
+const slippiProtocol = "slippi-mirror";
 
 const waitForMainWindow = async () => {
   let retryIdx = 0;
@@ -589,9 +589,7 @@ app
     }
 
     // Register the protocol for development
-    if (isDevelopment) {
-      app.setAsDefaultProtocolClient(slippiProtocol);
-    }
+    app.setAsDefaultProtocolClient(slippiProtocol);
 
     void createWindow();
 
