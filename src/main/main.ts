@@ -228,8 +228,8 @@ const startReplayStream = async (url: string, destination: string): Promise<void
   let lastSize = 0;
   let gameEndDetected = false;
   const streamInterval = 500; // Check for updates every 500ms
-  let consecutiveNoDataCount = 0;
-  const maxConsecutiveNoData = 60; // Fallback: stop after 30 seconds of no new data (60 * 500ms)
+  let consecutiveErrorCount = 0;
+  const maxConsecutiveErrors = 10; // Stop after 10 consecutive errors (5 seconds of errors)
 
   // Initial download to get the file started
   try {
@@ -294,6 +294,7 @@ const startReplayStream = async (url: string, destination: string): Promise<void
 
       const req = httpModule.request(options, (res) => {
         if (res.statusCode === 206 || res.statusCode === 200) {
+          consecutiveErrorCount = 0; // Reset error count on successful response
           const chunks: Buffer[] = [];
 
           res.on("data", (chunk: Buffer) => {
@@ -307,7 +308,6 @@ const startReplayStream = async (url: string, destination: string): Promise<void
                 // Append new data to the file
                 await fs.appendFile(destination, newData);
                 lastSize += newData.length;
-                consecutiveNoDataCount = 0; // Reset counter since we got data
                 log.debug(`Streamed ${newData.length} new bytes, total size: ${lastSize}`);
 
                 // Check if the game has ended
@@ -317,20 +317,7 @@ const startReplayStream = async (url: string, destination: string): Promise<void
                   activeStreams.delete(destination);
                   return;
                 }
-              } else {
-                consecutiveNoDataCount++;
               }
-            } else {
-              consecutiveNoDataCount++;
-            }
-
-            // Fallback: Stop streaming if no new data for too long
-            if (consecutiveNoDataCount >= maxConsecutiveNoData) {
-              log.info(
-                `Stopping stream for ${url} - no new data for ${maxConsecutiveNoData * streamInterval}ms (fallback)`,
-              );
-              activeStreams.delete(destination);
-              return;
             }
 
             // Continue streaming
@@ -338,18 +325,7 @@ const startReplayStream = async (url: string, destination: string): Promise<void
             activeStreams.set(destination, timeoutId);
           });
         } else {
-          consecutiveNoDataCount++;
-
-          // Fallback: Stop streaming if no new data for too long
-          if (consecutiveNoDataCount >= maxConsecutiveNoData) {
-            log.info(
-              `Stopping stream for ${url} - no new data for ${maxConsecutiveNoData * streamInterval}ms (fallback)`,
-            );
-            activeStreams.delete(destination);
-            return;
-          }
-
-          // Continue streaming even if no new data
+          // Continue streaming even if no new data as the game could be paused
           const timeoutId = setTimeout(streamLoop, streamInterval);
           activeStreams.set(destination, timeoutId);
         }
@@ -357,11 +333,11 @@ const startReplayStream = async (url: string, destination: string): Promise<void
 
       req.on("error", (err) => {
         log.error(`Stream request failed: ${err}`);
-        consecutiveNoDataCount++;
+        consecutiveErrorCount++;
 
-        // Fallback: Stop streaming if too many consecutive errors
-        if (consecutiveNoDataCount >= maxConsecutiveNoData) {
-          log.info(`Stopping stream for ${url} - too many consecutive errors (fallback)`);
+        // Stop streaming if too many consecutive errors
+        if (consecutiveErrorCount >= maxConsecutiveErrors) {
+          log.info(`Stopping stream for ${url} - too many consecutive errors (${consecutiveErrorCount})`);
           activeStreams.delete(destination);
           return;
         }
@@ -374,11 +350,11 @@ const startReplayStream = async (url: string, destination: string): Promise<void
       req.end();
     } catch (err) {
       log.error(`Stream update failed: ${err}`);
-      consecutiveNoDataCount++;
+      consecutiveErrorCount++;
 
-      // Fallback: Stop streaming if too many consecutive errors
-      if (consecutiveNoDataCount >= maxConsecutiveNoData) {
-        log.info(`Stopping stream for ${url} - too many consecutive errors (fallback)`);
+      // Stop streaming if too many consecutive errors
+      if (consecutiveErrorCount >= maxConsecutiveErrors) {
+        log.info(`Stopping stream for ${url} - too many consecutive errors (${consecutiveErrorCount})`);
         activeStreams.delete(destination);
         return;
       }
