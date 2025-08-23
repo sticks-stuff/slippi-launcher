@@ -1,3 +1,61 @@
+import nodeFetch from "node-fetch";
+// --- Mirroring automation state ---
+let lastMirroredReplay: { filename: string; consoleName: string } | null = null;
+let pollingForNextReplay = false;
+let pollTimeout: NodeJS.Timeout | null = null;
+
+const pollForNextReplay = async () => {
+  if (!lastMirroredReplay) return;
+  try {
+    const res = await nodeFetch("https://sharlot.memes.nz/app/api/replays");
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data.replays)) return;
+    // Only consider replays that are active and recent (within 30 seconds)
+    const now = Date.now();
+    const THIRTY_SECONDS_MS = 30 * 1000;
+    const next = data.replays.find((r: any) => {
+      if (!r.game_info) return false;
+      if (r.game_info.console_name !== lastMirroredReplay!.consoleName) return false;
+      if (r.filename === lastMirroredReplay!.filename) return false;
+      if (r.game_info.error) return false;
+      if (!r.is_active_transfer) return false;
+      // Check modified_time is within 5 minutes of now
+      if (!r.modified_time) return false;
+      const modTime = new Date(r.modified_time.replace(/-/g, '/')).getTime();
+      if (isNaN(modTime)) return false;
+      if (now - modTime > THIRTY_SECONDS_MS) return false;
+      return true;
+    });
+    if (next) {
+      log.info(`Auto-mirroring new replay for console ${lastMirroredReplay.consoleName}: ${next.filename}`);
+      // Stop polling so it can be restarted after the next replay ends
+      pollingForNextReplay = false;
+      lastMirroredReplay = { filename: next.filename, consoleName: next.game_info.console_name };
+      // Start mirroring the new replay
+      const streamUrl = `https://sharlot.memes.nz/slp-files/${next.filename}`;
+      const tmpDir = path.join(app.getPath("userData"), "temp");
+      await fs.ensureDir(tmpDir);
+      const destination = path.join(tmpDir, `mirror_${Date.now()}_${path.basename(next.filename)}`);
+      await startReplayStream(streamUrl, destination, next.game_info.console_name, next.filename);
+      await playReplayAndShowStats(destination, true, next.game_info.console_name, next.filename);
+      // After this finishes, polling will resume automatically
+      return;
+    }
+  } catch (err) {
+    log.error(`Polling for next replay failed: ${err}`);
+  }
+  // Schedule next poll
+  pollTimeout = setTimeout(pollForNextReplay, 1000);
+};
+
+const stopPollingForNextReplay = () => {
+  pollingForNextReplay = false;
+  if (pollTimeout) {
+    clearTimeout(pollTimeout);
+    pollTimeout = null;
+  }
+};
 /* eslint-disable @typescript-eslint/no-var-requires */
 /* eslint global-require: off, no-console: off, promise/always-return: off */
 
@@ -222,7 +280,12 @@ const activeStreams = new Map<string, NodeJS.Timeout>();
  * Downloads the file in chunks and updates it as new data becomes available.
  * Stops streaming when the Game End event (0x39) is detected.
  */
-const startReplayStream = async (url: string, destination: string): Promise<void> => {
+const startReplayStream = async (
+  url: string,
+  destination: string,
+  consoleName?: string,
+  replayFilename?: string
+): Promise<void> => {
   log.info(`Starting replay stream from ${url} to ${destination}`);
 
   let lastSize = 0;
@@ -275,6 +338,14 @@ const startReplayStream = async (url: string, destination: string): Promise<void
       if (gameEndDetected) {
         log.info(`Game has ended, stopping stream for ${url}`);
         activeStreams.delete(destination);
+        // Start polling for next replay if in mirror mode and we have info
+        if (destination.includes('mirror_') && consoleName && replayFilename) {
+          lastMirroredReplay = { filename: replayFilename, consoleName };
+          if (!pollingForNextReplay) {
+            pollingForNextReplay = true;
+            setTimeout(pollForNextReplay, 1000);
+          }
+        }
         return;
       }
 
@@ -315,6 +386,14 @@ const startReplayStream = async (url: string, destination: string): Promise<void
                 if (gameEndDetected) {
                   log.info(`Game End detected, stopping stream for ${url}`);
                   activeStreams.delete(destination);
+                  // Start polling for next replay if in mirror mode and we have info
+                  if (destination.includes('mirror_') && consoleName && replayFilename) {
+                    lastMirroredReplay = { filename: replayFilename, consoleName };
+                    if (!pollingForNextReplay) {
+                      pollingForNextReplay = true;
+                      pollForNextReplay();
+                    }
+                  }
                   return;
                 }
               }
@@ -430,7 +509,14 @@ const handleSlippiURIAsync = async (aUrl: string) => {
       const mirrorParam = myUrl.searchParams.get("mirror");
       const isMirror = mirrorParam === "true" || mirrorParam === "1";
 
+      // Extract console name from query parameter if present
+      let consoleName: string | undefined = myUrl.searchParams.get("console") || undefined;
+      let replayFilename: string | undefined = path.basename(replayPath);
+
       log.info(`Mirror mode requested: ${isMirror}`);
+      if (consoleName) {
+        log.info(`Console name from URL: ${consoleName}`);
+      }
 
       if (isMirror) {
         // For mirror mode, we need to stream the replay continuously
@@ -443,9 +529,12 @@ const handleSlippiURIAsync = async (aUrl: string) => {
         await fs.ensureDir(tmpDir);
         const destination = path.join(tmpDir, `mirror_${Date.now()}_${path.basename(replayPath)}`);
 
-        // Start streaming the replay file
-        await startReplayStream(streamUrl, destination);
-        await playReplayAndShowStats(destination, isMirror);
+        // Stop any previous polling
+        stopPollingForNextReplay();
+
+        // Start streaming the replay file (will append new data as it comes in)
+        await startReplayStream(streamUrl, destination, consoleName, replayFilename);
+        await playReplayAndShowStats(destination, isMirror, consoleName, replayFilename);
       } else {
         // For normal mode, download the file first
         // For some reason the file refuses to download if it's prefixed with "/"
@@ -518,25 +607,25 @@ app.on("second-instance", (_, argv) => {
   handleSlippiURI(lastItem);
 });
 
-const playReplayAndShowStats = async (filePath: string, mirror = false) => {
+const playReplayAndShowStats = async (filePath: string, mirror = false, consoleName?: string, replayFilename?: string) => {
   // Ensure playback dolphin is actually installed
   await dolphinManager.installDolphin(DolphinLaunchType.PLAYBACK);
 
   log.info(`Launching replay in ${mirror ? "mirror" : "normal"} mode: ${filePath}`);
 
   // For mirror mode, set up a listener to stop streaming when Dolphin closes
+  let subscription: any = null;
   if (mirror) {
     const stopStreamingOnDolphinClose = (event: any) => {
       if (event.dolphinType === DolphinLaunchType.PLAYBACK && event.instanceId === "playback") {
-        log.info("Dolphin closed, stopping stream...");
+        log.info("Dolphin closed, stopping stream and polling for new replays...");
         stopReplayStream(filePath);
+        stopPollingForNextReplay();
         // Unsubscribe from future events
-        subscription.unsubscribe();
+        if (subscription) subscription.unsubscribe();
       }
     };
-
-    // Subscribe to dolphin events to detect when it closes
-    const subscription = dolphinManager.events.subscribe(stopStreamingOnDolphinClose);
+    subscription = dolphinManager.events.subscribe(stopStreamingOnDolphinClose);
   }
 
   // Launch the replay
