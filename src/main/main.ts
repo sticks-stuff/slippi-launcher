@@ -38,7 +38,7 @@ const pollForNextReplay = async () => {
       await fs.ensureDir(tmpDir);
       const destination = path.join(tmpDir, `mirror_${Date.now()}_${path.basename(next.filename)}`);
       await startReplayStream(streamUrl, destination, next.game_info.console_name, next.filename);
-      await playReplayAndShowStats(destination, true, next.game_info.console_name, next.filename);
+      await playReplayAndShowStats(destination, true);
       // After this finishes, polling will resume automatically
       return;
     }
@@ -534,7 +534,7 @@ const handleSlippiURIAsync = async (aUrl: string) => {
 
         // Start streaming the replay file (will append new data as it comes in)
         await startReplayStream(streamUrl, destination, consoleName, replayFilename);
-        await playReplayAndShowStats(destination, isMirror, consoleName, replayFilename);
+        await playReplayAndShowStats(destination, isMirror);
       } else {
         // For normal mode, download the file first
         // For some reason the file refuses to download if it's prefixed with "/"
@@ -607,7 +607,7 @@ app.on("second-instance", (_, argv) => {
   handleSlippiURI(lastItem);
 });
 
-const playReplayAndShowStats = async (filePath: string, mirror = false, consoleName?: string, replayFilename?: string) => {
+const playReplayAndShowStats = async (filePath: string, mirror = false) => {
   // Ensure playback dolphin is actually installed
   await dolphinManager.installDolphin(DolphinLaunchType.PLAYBACK);
 
